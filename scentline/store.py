@@ -15,13 +15,15 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from .decay import INTENSITY_FLOOR, effective_reward, is_live
 from .fingerprint import canonical_url
-from .types import SniffResult, Trail, TrailHit
+from .types import KIND_HAZARD, KIND_ROUTE, SniffResult, Trail, TrailHit
 
 DEFAULT_HOME = Path("~/.scentline").expanduser() / "trails.jsonl"
 ENV_FILE = "SCENTLINE_FILE"
@@ -70,8 +72,9 @@ class TrailStore:
                 trails[t.id] = t
             except Exception:
                 if not self._warned:
+                    # stderr: stdout may be a protocol stream (MCP server / CLI --json)
                     print(f"[scentline] skipping corrupt trail record in {self.path}",
-                          flush=True)
+                          file=sys.stderr, flush=True)
                     self._warned = True
         return trails
 
@@ -92,8 +95,8 @@ class TrailStore:
     # ------------------------------------------------------------------ ops
     def deposit(self, trail: Trail, now: float | None = None) -> Trail:
         """Deposit (or reinforce) a trail. Merging is by route identity:
-        same entry URL + same DOM fingerprint + same route shape → the
-        existing trail's pheromone stack gains this walk's contribution."""
+        same entry URL + same DOM fingerprint + same route shape + same kind
+        → the existing trail's pheromone stack gains this walk's contribution."""
         now = time.time() if now is None else float(now)
         trail.url = canonical_url(trail.url)
         if not trail.walks:
@@ -124,7 +127,7 @@ class TrailStore:
                 stored = trail
             self._write(trails)
         self._log_event("deposit", {"id": stored.id, "url": stored.url,
-                                    "steps": len(stored.steps)})
+                                    "trail_kind": stored.kind, "steps": len(stored.steps)})
         return stored
 
     def reinforce(self, trail_id: str, delta: float, now: float | None = None) -> Trail | None:
@@ -153,6 +156,16 @@ class TrailStore:
         return [t for t in trails.values()
                 if t.url == key and is_live(t, now, floor)]
 
+    def live_for_host(self, host: str, now: float | None = None,
+                      floor: float = INTENSITY_FLOOR) -> list[Trail]:
+        """All live trails anywhere on ``host`` — the thin scent used for
+        host-level hints when a page has no trails of its own."""
+        now = time.time() if now is None else float(now)
+        with self._locked():
+            trails = self._read()
+        return [t for t in trails.values()
+                if urlsplit(t.url).netloc == host and is_live(t, now, floor)]
+
     def evict_dead(self, now: float | None = None,
                    floor: float = INTENSITY_FLOOR) -> int:
         """GC: drop trails below the intensity floor / past TTL. Returns count."""
@@ -177,6 +190,7 @@ class TrailStore:
             "trails": len(trails),
             "walks": sum(t.deposits for t in trails.values()),
             "scent_mass": round(mass, 4),
+            "hazards": sum(1 for t in trails.values() if t.kind == KIND_HAZARD),
         }
 
 
@@ -197,27 +211,48 @@ def sniff(url: str, dom_sha: str | None = None, my_tokens: list[str] | None = No
           ) -> SniffResult:
     """Sniff the scent at ``url``.
 
-    Ranks trails for the querying agent:
+    Routes are ranked for the querying agent:
       rank 3 – same URL *and* same DOM fingerprint: follow it.
       rank 2 – same URL, DOM differs: DRIFT WARNING, verify before replay.
-      rank 1 – same host only: thin scent, loose hint.
+    Hazards at this URL are always reported (never truncated away) —
+    negative pheromone is safety information.
+    Host hints: live trails elsewhere on the same host, confidence damped
+    by path similarity (thin scent — follow loosely).
     """
     store = store or TrailStore()
     now = time.time() if now is None else float(now)
     my_tokens = my_tokens or []
     key = canonical_url(url)
-    hits: list[TrailHit] = []
+    host = urlsplit(key).netloc
+
+    routes: list[TrailHit] = []
+    hazards: list[TrailHit] = []
     for t in store.live_for_url(key, now):
-        anchored = dom_sha and t.dom_sha and t.dom_sha != "unanchored"
+        anchored = bool(dom_sha and t.dom_sha and t.dom_sha != "unanchored")
         rank = 3 if (anchored and t.dom_sha == dom_sha) else 2
-        sim = _jaccard(my_tokens, t.tokens)
-        hits.append(TrailHit(trail=t, intensity=effective_reward(t, now),
-                             rank=rank, similarity=sim))
-    hits.sort(key=lambda h: (-h.rank, -h.intensity))
+        hit = TrailHit(trail=t, intensity=effective_reward(t, now), rank=rank,
+                       similarity=_jaccard(my_tokens, t.tokens))
+        (hazards if t.kind == KIND_HAZARD else routes).append(hit)
+    routes.sort(key=lambda h: (-h.rank, -h.intensity))
+    hazards.sort(key=lambda h: -h.intensity)
+
     drift = None
-    if dom_sha and any(h.rank == 2 for h in hits):
+    if dom_sha and any(h.rank == 2 for h in routes):
         drift = {
-            "expected": sorted({h.trail.dom_sha for h in hits if h.rank == 2}),
+            "expected": sorted({h.trail.dom_sha for h in routes if h.rank == 2}),
             "observed": dom_sha,
         }
-    return SniffResult(url=key, hits=hits[:max(k, 0)], drift=drift)
+
+    hints: list[TrailHit] = []
+    if host:
+        seen = {h.trail.id for h in routes} | {h.trail.id for h in hazards}
+        for t in store.live_for_host(host, now):
+            if t.id in seen or t.kind != KIND_ROUTE:
+                continue
+            sim = _jaccard(my_tokens, t.tokens)
+            hints.append(TrailHit(trail=t, intensity=effective_reward(t, now),
+                                  rank=1, similarity=sim))
+    hints.sort(key=lambda h: -(h.intensity * h.similarity))
+
+    return SniffResult(url=key, hits=routes[:max(k, 0)], drift=drift,
+                       hazards=hazards[:3], host_hints=hints[:2])

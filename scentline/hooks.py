@@ -2,6 +2,8 @@
 
 mark(url, html)            – wrap a working session; record steps; leave a
                              trail ONLY on explicit success (leave_trail()).
+leave_hazard(note)         – negative pheromone: the recorded steps led to
+                             failure. Other agents will be warned to avoid.
 sniff(url, dom_sha, ...)   – read the shared scent at a URL, ranked for this
                              agent (exact → drift → host hints).
 _resolve_step(page, step)  – follower-side helper: resolve a recorded target
@@ -13,13 +15,14 @@ from __future__ import annotations
 
 from .fingerprint import fingerprint_dom
 from .store import TrailStore, sniff as _sniff
-from .types import Step, Trail
+from .types import KIND_HAZARD, KIND_ROUTE, Step, Trail
 
 SCRUB_ACTIONS = {"fill", "press", "select"}  # payloads may carry user-typed data
 
 
 class RouteRecorder:
-    """Records the route an agent walks. Deposit happens only on success."""
+    """Records the route an agent walks. Deposit happens only on success —
+    or, explicitly, as a hazard on failure."""
 
     def __init__(self, url: str, dom_sha: str | None, store: TrailStore | None = None,
                  author: str = "anonymous", scrub: bool = True) -> None:
@@ -45,15 +48,33 @@ class RouteRecorder:
 
     def leave_trail(self, note: str | None = None, ttl_seconds: float | None = None,
                     reward: float = 1.0) -> Trail:
-        """Deposit the recorded route as pheromone. Call ONLY on success —
-        failed sessions leave no scent (no negative pheromone in v0.1)."""
+        """Deposit the recorded route as positive pheromone. Call ONLY on
+        success — failed sessions leave no route scent."""
         if self._deposited:
             raise RuntimeError("leave_trail() called twice on one recorder")
         self._deposited = True
         trail = Trail(url=self.url, dom_sha=self.dom_sha, steps=list(self.steps),
                       reward=reward, author=self.author, note=note,
-                      ttl_seconds=ttl_seconds)
+                      ttl_seconds=ttl_seconds, kind=KIND_ROUTE)
         store = self.store or TrailStore()
+        return store.deposit(trail)
+
+    def leave_hazard(self, note: str | None = None, ttl_seconds: float | None = None,
+                     reward: float = 1.0) -> Trail:
+        """Deposit the recorded steps as a hazard (negative pheromone): this
+        route shape led to failure — warn every later agent away from it.
+
+        The step buffer is cleared after the deposit, so the session can
+        recover: a later leave_trail() contains only post-recovery steps.
+        Hazards evaporate under the same physics as routes — a hazard nobody
+        re-encounters fades; one agents keep hitting stays hot."""
+        if not self.steps:
+            raise RuntimeError("leave_hazard() needs at least one recorded step")
+        trail = Trail(url=self.url, dom_sha=self.dom_sha, steps=list(self.steps),
+                      reward=reward, author=self.author, note=note,
+                      ttl_seconds=ttl_seconds, kind=KIND_HAZARD)
+        store = self.store or TrailStore()
+        self.steps = []
         return store.deposit(trail)
 
     # context-manager support: an exception inside the block means no deposit

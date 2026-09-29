@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scentline"
-version = "0.1.0"
+version = "0.2.0"
 description = "Stigmergic trail memory for web agents: evaporating, DOM-anchored route trails shared across sessions, agents, and frameworks."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -36,6 +36,7 @@ dependencies = []
 
 [project.scripts]
 scentline = "scentline.cli:main"
+scentline-mcp = "scentline.mcp:serve"
 
 [project.urls]
 Homepage = "https://github.com/ar33s08/scentline"

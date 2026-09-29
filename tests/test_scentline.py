@@ -2,13 +2,14 @@
 store merging/locking, sniffing ranks, projection, secret scrubbing."""
 
 import json
+import os
 import subprocess
 import sys
 import time
 
 import pytest
 
-from scentline import (Step, Trail, TrailStore, canonical_url,
+from scentline import (KIND_HAZARD, Step, Trail, TrailStore, canonical_url,
                        fingerprint_dom, is_live, mark, render_sniff, sniff)
 from scentline.decay import effective_reward
 
@@ -194,3 +195,209 @@ def test_evict_dead_gc(tmp_path):
     s.deposit(Trail(url="https://e.com", dom_sha="d", steps=[Step("click", "#a")]), now=100.0)
     n = s.evict_dead(now=100.0 + 90 * 24 * 3600)
     assert n == 1 and s.stat()["trails"] == 0
+
+
+# ---------------------------------------------------------------- hazards (negative pheromone)
+def test_hazard_deposit_and_sniff(tmp_path):
+    s = _fresh_store(tmp_path)
+    steps = [Step("click", "#newsletter-modal")]
+    s.deposit(Trail(url="https://e.com/x", dom_sha="AAA", steps=steps,
+                    note="modal traps the agent forever", kind=KIND_HAZARD), now=100.0)
+    r = sniff("https://e.com/x", dom_sha="AAA", store=s, now=101.0)
+    assert len(r.hazards) == 1 and r.hits == []
+    assert "AVOID" in render_sniff(r)
+    assert "modal traps" in render_sniff(r)
+
+
+def test_hazard_and_route_coexist_ranked(tmp_path):
+    s = _fresh_store(tmp_path)
+    steps = [Step("click", "#a")]
+    s.deposit(Trail(url="https://e.com/x", dom_sha="AAA", steps=steps), now=100.0)
+    s.deposit(Trail(url="https://e.com/x", dom_sha="AAA", steps=[Step("click", "#trap")],
+                    kind=KIND_HAZARD), now=100.0)
+    r = sniff("https://e.com/x", dom_sha="AAA", store=s, now=101.0)
+    out = render_sniff(r)
+    assert out.index("AVOID") < out.index("click:#a")  # hazards render first
+
+
+def test_hazard_merges_by_identity(tmp_path):
+    s = _fresh_store(tmp_path)
+    steps = [Step("click", "#trap")]
+    s.deposit(Trail(url="https://e.com/x", dom_sha="AAA", steps=steps, kind=KIND_HAZARD), now=100.0)
+    t = s.deposit(Trail(url="https://e.com/x", dom_sha="AAA", steps=steps, kind=KIND_HAZARD), now=200.0)
+    assert t.deposits == 2
+    # a route deposit with the same shape must NOT merge into the hazard
+    r = s.deposit(Trail(url="https://e.com/x", dom_sha="AAA", steps=steps), now=300.0)
+    assert r.kind != KIND_HAZARD and r.deposits == 1
+    assert s.stat()["trails"] == 2
+
+
+def test_recorder_leave_hazard_clears_buffer(tmp_path):
+    s = _fresh_store(tmp_path)
+    with mark("https://e.com", html=PAGE_V1, store=s) as rec:
+        rec.step("click", "#trap-link")
+        rec.leave_hazard(note="infinite modal")
+        rec.step("click", "#recovery-path")
+        trail = rec.leave_trail(note="recovered via direct URL")
+    assert s.stat()["hazards"] == 1
+    assert [st.token() for st in trail.steps] == ["click:#recovery-path"]
+
+
+def test_leave_hazard_requires_steps():
+    with mark("https://e.com") as rec:
+        with pytest.raises(RuntimeError):
+            rec.leave_hazard()
+
+
+# ---------------------------------------------------------------- host hints
+def test_host_hints_returned_for_cold_page(tmp_path):
+    s = _fresh_store(tmp_path)
+    s.deposit(Trail(url="https://e.com/products/list", dom_sha="AAA",
+                    steps=[Step("click", "#filter-price")]), now=100.0)
+    r = sniff("https://e.com/products/42", dom_sha="ZZZ", store=s, now=101.0)
+    assert r.hits == [] and len(r.host_hints) == 1
+    assert r.host_hints[0].rank == 1 and r.host_hints[0].confidence < 1.0
+    assert "hint" in render_sniff(r)
+
+
+def test_host_hints_exclude_same_url_trails(tmp_path):
+    s = _fresh_store(tmp_path)
+    steps = [Step("click", "#a")]
+    s.deposit(Trail(url="https://e.com/x", dom_sha="AAA", steps=steps), now=100.0)
+    s.deposit(Trail(url="https://e.com/y", dom_sha="AAA", steps=steps), now=100.0)
+    r = sniff("https://e.com/x", dom_sha="AAA", store=s, now=101.0)
+    assert len(r.hits) == 1 and len(r.host_hints) == 1
+    assert r.host_hints[0].trail.url == "https://e.com/y"
+
+
+# ---------------------------------------------------------------- MCP server
+def _rpc(msgs, tmp_path):
+    trail_file = str(tmp_path / "mcp.trails.jsonl")
+    proc = subprocess.run(
+        [sys.executable, "-m", "scentline.mcp"],
+        input="\n".join(json.dumps(m) for m in msgs) + "\n",
+        capture_output=True, text=True, timeout=60,
+        env={**os.environ, "SCENTLINE_FILE": trail_file})
+    assert proc.returncode == 0, proc.stderr
+    return [json.loads(l) for l in proc.stdout.splitlines() if l.strip()]
+
+
+def test_mcp_initialize_and_tools_list(tmp_path):
+    out = _rpc([
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+    ], tmp_path)
+    assert out[0]["result"]["serverInfo"]["name"] == "scentline"
+    names = {t["name"] for t in out[1]["result"]["tools"]}
+    assert {"scentline_sniff", "scentline_deposit_route",
+            "scentline_deposit_hazard", "scentline_stat"} <= names
+
+
+def test_mcp_deposit_then_sniff_roundtrip(tmp_path):
+    steps = [{"action": "click", "target": "#buy"}]
+    out = _rpc([
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+            "name": "scentline_deposit_route",
+            "arguments": {"url": "https://e.com/x", "steps": steps, "note": "works"}}},
+        {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
+            "name": "scentline_sniff",
+            "arguments": {"url": "https://e.com/x"}}},
+    ], tmp_path)
+    assert "deposited route" in out[1]["result"]["content"][0]["text"]
+    assert "click:#buy" in out[2]["result"]["content"][0]["text"]
+
+
+def test_mcp_hazard_tool(tmp_path):
+    out = _rpc([
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+            "name": "scentline_deposit_hazard",
+            "arguments": {"url": "https://e.com/x",
+                          "steps": [{"action": "click", "target": "#trap"}]}}},
+        {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
+            "name": "scentline_sniff",
+            "arguments": {"url": "https://e.com/x"}}},
+    ], tmp_path)
+    assert "hazard" in out[1]["result"]["content"][0]["text"]
+    assert "AVOID" in out[2]["result"]["content"][0]["text"]
+
+
+def test_mcp_scrubs_secret_values(tmp_path):
+    out = _rpc([
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+            "name": "scentline_deposit_route",
+            "arguments": {"url": "https://e.com/x",
+                          "steps": [{"action": "fill", "target": "#pw",
+                                     "value": "hunter2"}]}}},
+    ], tmp_path)
+    assert "deposited route" in out[1]["result"]["content"][0]["text"]
+    trail_file = tmp_path / "mcp.trails.jsonl"
+    assert "hunter2" not in trail_file.read_text()
+
+
+def test_mcp_error_handling(tmp_path):
+    out = _rpc([
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+            "name": "scentline_reinforce",
+            "arguments": {"trail_id": "nope", "delta": 1.0}}},
+        {"jsonrpc": "2.0", "id": 3, "method": "bogus/method"},
+        {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {
+            "name": "no_such_tool", "arguments": {}}},
+    ], tmp_path)
+    # reinforcing an evaporated trail is a domain outcome, not a tool error
+    assert "not found" in out[1]["result"]["content"][0]["text"]
+    assert out[2]["error"]["code"] == -32601
+    assert out[3]["result"]["isError"] is True
+
+
+def test_mcp_survives_parse_error_and_empty_lines(tmp_path):
+    trail_file = str(tmp_path / "mcp.trails.jsonl")
+    proc = subprocess.run(
+        [sys.executable, "-m", "scentline.mcp"],
+        input="{broken json\n\n{\"jsonrpc\": \"2.0\", \"id\": 9, \"method\": \"ping\"}\n",
+        capture_output=True, text=True, timeout=60,
+        env={**os.environ, "SCENTLINE_FILE": trail_file})
+    assert proc.returncode == 0
+    lines = [json.loads(l) for l in proc.stdout.splitlines() if l.strip()]
+    assert lines[0]["error"]["code"] == -32700
+    assert lines[1]["result"] == {}
+
+
+# ---------------------------------------------------------------- CLI errors
+def test_cli_deposit_missing_file(tmp_path):
+    r = subprocess.run([sys.executable, "-m", "scentline.cli", "--file",
+                        str(tmp_path / "t.jsonl"), "deposit", "/nonexistent.json"],
+                       capture_output=True, text=True)
+    assert r.returncode == 2 and "not found" in r.stderr
+
+
+def test_cli_deposit_bad_json(tmp_path):
+    r = subprocess.run([sys.executable, "-m", "scentline.cli", "--file",
+                        str(tmp_path / "t.jsonl"), "deposit", "-"],
+                       input="{not json", capture_output=True, text=True)
+    assert r.returncode == 2 and "not valid JSON" in r.stderr
+
+
+def test_cli_sniff_json_shows_hazards(tmp_path):
+    s = _fresh_store(tmp_path)
+    now = time.time()
+    s.deposit(Trail(url="https://e.com/x", dom_sha="AAA",
+                    steps=[Step("click", "#trap")], kind=KIND_HAZARD), now=now)
+    r = subprocess.run([sys.executable, "-m", "scentline.cli", "--file",
+                        str(tmp_path / "trails.jsonl"),
+                        "sniff", "https://e.com/x", "--json"],
+                       capture_output=True, text=True,
+                       env={**os.environ,
+                            "PYTHONPATH": os.path.dirname(os.path.dirname(
+                                os.path.abspath(__file__)))})
+    assert r.returncode == 0
+    data = json.loads(r.stdout)
+    assert data["hazards"][0]["kind"] == "hazard"

@@ -15,7 +15,7 @@ import sys
 
 from .context import render_sniff
 from .store import TrailStore, sniff as _sniff
-from .types import Step, Trail
+from .types import KIND_ROUTE, Step, Trail
 
 
 def main(argv=None) -> int:
@@ -44,29 +44,46 @@ def main(argv=None) -> int:
     store = TrailStore(args.file)
 
     if args.cmd == "deposit":
-        raw = sys.stdin.read() if args.payload == "-" else open(args.payload, encoding="utf-8").read()
-        data = json.loads(raw)
+        try:
+            if args.payload == "-":
+                raw = sys.stdin.read()
+            else:
+                with open(args.payload, encoding="utf-8") as fh:
+                    raw = fh.read()
+            data = json.loads(raw)
+        except FileNotFoundError:
+            print(f"scentline: payload file not found: {args.payload}", file=sys.stderr)
+            return 2
+        except json.JSONDecodeError as e:
+            print(f"scentline: payload is not valid JSON: {e}", file=sys.stderr)
+            return 2
         trail = Trail(url=data["url"], dom_sha=data.get("dom_sha", "unanchored"),
                       steps=[Step.from_dict(x) for x in data.get("steps", [])],
                       author=data.get("author", "cli"), note=data.get("note"),
-                      ttl_seconds=data.get("ttl_seconds"))
+                      ttl_seconds=data.get("ttl_seconds"),
+                      kind=data.get("kind", KIND_ROUTE))
         stored = store.deposit(trail)
-        print(json.dumps({"id": stored.id, "deposits": stored.deposits,
-                          "reward": stored.reward}))
+        print(json.dumps({"id": stored.id, "kind": stored.kind,
+                          "deposits": stored.deposits, "reward": stored.reward}))
         return 0
 
     if args.cmd == "sniff":
         result = _sniff(args.url, dom_sha=args.dom_sha, store=store)
         if args.as_json:
+            def hit_json(h):
+                return {"id": h.trail.id, "kind": h.trail.kind, "rank": h.rank,
+                        "intensity": round(h.intensity, 3),
+                        "similarity": round(h.similarity, 3),
+                        "confidence": round(h.confidence, 3),
+                        "walks": h.trail.deposits,
+                        "tokens": h.trail.tokens,
+                        "note": h.trail.note}
             print(json.dumps({
                 "url": result.url,
                 "drift": result.drift,
-                "hits": [{"id": h.trail.id, "rank": h.rank,
-                          "intensity": round(h.intensity, 3),
-                          "similarity": round(h.similarity, 3),
-                          "walks": h.trail.deposits,
-                          "tokens": h.trail.tokens,
-                          "note": h.trail.note} for h in result.hits],
+                "hits": [hit_json(h) for h in result.hits],
+                "hazards": [hit_json(h) for h in result.hazards],
+                "host_hints": [hit_json(h) for h in result.host_hints],
             }, indent=2))
         else:
             print(render_sniff(result))
@@ -81,7 +98,8 @@ def main(argv=None) -> int:
     if args.cmd == "stat":
         s = store.stat()
         print(json.dumps(s) if args.as_json
-              else f"trails: {s['trails']} | walks: {s['walks']} | scent mass: {s['scent_mass']}")
+              else f"trails: {s['trails']} | walks: {s['walks']} | "
+                   f"hazards: {s['hazards']} | scent mass: {s['scent_mass']}")
         return 0
 
     return 1

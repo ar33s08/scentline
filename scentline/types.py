@@ -1,7 +1,7 @@
 """Scentline core types: Steps and Trails.
 
 A Trail is a pheromone deposit left on the web graph by one agent session
-so that later sessions can follow (or avoid) the same route.
+so that later sessions can follow (route) or avoid (hazard) the same path.
 
 Only the standard library is used anywhere in Scentline.
 """
@@ -11,6 +11,9 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
 from typing import Optional
+
+KIND_ROUTE = "route"      # positive pheromone: this path worked
+KIND_HAZARD = "hazard"    # negative pheromone: this path failed — avoid
 
 
 @dataclass
@@ -55,7 +58,14 @@ class Step:
 
 @dataclass
 class Trail:
-    """A pheromone trail: one successful (or failed) route across a page."""
+    """A pheromone trail on the web graph.
+
+    ``kind="route"``  – positive pheromone: a path that worked. Later agents
+                        follow it.
+    ``kind="hazard"`` – negative pheromone: a path that led to failure. Later
+                        agents avoid it. Same evaporation physics as routes —
+                        a hazard nobody re-confirms fades like any scent.
+    """
 
     url: str                       # entry URL (canonicalized on deposit)
     dom_sha: str                   # fingerprint of the entry page state
@@ -68,6 +78,7 @@ class Trail:
     ttl_seconds: Optional[float] = None  # hard expiry, else config default
     author: str = "anonymous"      # agent/session id that left it
     note: Optional[str] = None     # free-text "why this route" (first non-empty wins)
+    kind: str = KIND_ROUTE         # route | hazard
     id: str = field(default_factory=lambda: "t" + uuid.uuid4().hex[:12])
 
     @property
@@ -75,11 +86,11 @@ class Trail:
         return [s.token() for s in self.steps]
 
     def identity(self) -> tuple:
-        """Merging key: same page + same route shape = same trail.
+        """Merging key: same page + same route shape + same kind = same trail.
         The URL is canonicalized here so identity is stable even before deposit."""
         from .fingerprint import canonical_url
 
-        return (canonical_url(self.url), self.dom_sha, tuple(self.tokens))
+        return (canonical_url(self.url), self.dom_sha, tuple(self.tokens), self.kind)
 
     def to_dict(self) -> dict:
         return {
@@ -95,6 +106,7 @@ class Trail:
             "ttl_seconds": self.ttl_seconds,
             "author": self.author,
             "note": self.note,
+            "kind": self.kind,
         }
 
     @classmethod
@@ -112,6 +124,7 @@ class Trail:
             ttl_seconds=d.get("ttl_seconds"),
             author=d.get("author", "anonymous"),
             note=d.get("note"),
+            kind=d.get("kind", KIND_ROUTE),
         )
 
 
@@ -132,8 +145,10 @@ class TrailHit:
 @dataclass
 class SniffResult:
     url: str
-    hits: list[TrailHit]
+    hits: list[TrailHit] = field(default_factory=list)        # live routes at this URL
     drift: Optional[dict] = None  # {"expected": [dom_sha...], "observed": dom_sha}
+    hazards: list[TrailHit] = field(default_factory=list)     # live hazards at this URL
+    host_hints: list[TrailHit] = field(default_factory=list)  # thin scent, same host
 
     def render(self, budget_tokens: int = 600) -> str:
         """Project trails into a compact text block for an agent's context window."""

@@ -17,11 +17,18 @@ colony converges. Scentline applies that to browser agents:
 - **Merging is by route identity** — same entry URL + same DOM fingerprint +
   same route shape — so a hundred agents that each found the checkout funnel
   pile pheromone onto *one* collective trail.
+- **Negative pheromones (hazards)**: a route that led to failure can be
+  deposited as a hazard. Later agents see `! AVOID …` before they touch that
+  path. Hazards evaporate under the same physics — one nobody re-hits fades,
+  one every agent keeps hitting stays hot.
 - **Drift is surfaced, never hidden**: follower agents fingerprint their own
   live page. If the site redesigned since the trail was laid, they get a
-  `DRIFT WARNING` instead of silently replaying stale selectors. Cosmetic
+  `DRIFT WARNING` instead of silently replaying dead selectors. Cosmetic
   redesigns (new ids/classes/themes, same labels) hash identically, so trails
   survive them.
+- **Cold pages still get help**: no trails at this URL? `sniff` returns
+  same-host hints from nearby pages, confidence-damped — thin scent, followed
+  loosely.
 
 Everything is deterministic — no LLM inside the memory mechanics. The only
 stdlib dependency is Python itself. `pip install scentline` (zero deps).
@@ -47,8 +54,28 @@ print(scent.render())          # drop this straight into the agent's context
 #    # catalog search works; homepage search is broken
 ```
 
-Failed sessions leave **no scent** — deposit happens only on an explicit
-`leave_trail()` inside a clean `with` block.
+Failed sessions leave **no route scent** — deposit happens only on an
+explicit `leave_trail()` inside a clean `with` block. A *diagnosed* failure
+is different: call `rec.leave_hazard(note="this modal traps agents forever")`
+to warn every later agent off that path.
+
+### Any MCP client shares the colony
+
+The package ships a Model Context Protocol server written in **raw stdlib
+JSON-RPC** — no SDK, no dependencies:
+
+```bash
+claude mcp add scentline -- python -m scentline.mcp
+# or any MCP client config:
+{"command": "python", "args": ["-m", "scentline.mcp"],
+ "env": {"SCENTLINE_FILE": "/shared/trails.jsonl"}}
+```
+
+Tools: `scentline_sniff`, `scentline_deposit_route`,
+`scentline_deposit_hazard`, `scentline_reinforce`, `scentline_gc`,
+`scentline_stat`. That means Claude, Cursor, or any MCP-speaking agent can
+follow the same trails a Playwright bot laid — the colony is the shared
+file, not the framework.
 
 ### CLI
 
@@ -88,6 +115,7 @@ them by embedding similarity. Scentline's mechanics are pure code:
 |---|---|---|
 | Route reuse | LLM summaries + embedding match | exact route identity (URL+DOM+shape) |
 | Evaporation | none — memory only grows | per-walk decay stack, TTL hard kill |
+| Failure learning | none | negative pheromones (hazards) that evaporate |
 | Stale-UI safety | none | DOM fingerprint drift warnings |
 | Identity stability | breaks on class/id churn | hash on structure+labels, not styling |
 | Concurrency | research scripts | fcntl-locked file, N processes |
@@ -109,9 +137,8 @@ like — the substrate stays deterministic, auditable, and cheap.
 
 ## Roadmap
 
-Negative pheromones (failed routes deposit aversive scent) · SQLite substrate
-· an MCP server so any MCP client shares one colony · embedding-based fuzzy
-DOM anchoring · cross-machine sync layers.
+SQLite substrate option · embedding-based fuzzy DOM anchoring · cross-machine
+sync layers · colony dashboards.
 
 ## License
 

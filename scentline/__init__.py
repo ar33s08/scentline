@@ -2,8 +2,8 @@
 
 The live web becomes a pheromone substrate: agents lay evaporating,
 DOM-anchored trails over the routes they walk, and every later session —
-any framework, any process — sniffs those trails instead of re-deriving
-the route from a cold page. Zero dependencies; standard library only.
+any framework, any process, any MCP client — sniffs those trails instead of
+re-deriving the route from a cold page. Zero dependencies; stdlib only.
 """
 
 from .context import render_sniff
@@ -11,9 +11,9 @@ from .decay import effective_reward, is_live
 from .fingerprint import canonical_url, fingerprint_dom
 from .hooks import RouteRecorder, mark, sniff
 from .store import TrailStore, default_path
-from .types import SniffResult, Step, Trail, TrailHit
+from .types import KIND_HAZARD, KIND_ROUTE, SniffResult, Step, Trail, TrailHit
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "mark",
@@ -30,5 +30,7 @@ __all__ = [
     "canonical_url",
     "effective_reward",
     "is_live",
+    "KIND_ROUTE",
+    "KIND_HAZARD",
     "__version__",
 ]
