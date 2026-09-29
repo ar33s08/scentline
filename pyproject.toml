@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scentline"
+version = "0.1.0"
+description = "Stigmergic trail memory for web agents: evaporating, DOM-anchored route trails shared across sessions, agents, and frameworks."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Arees Manesia" }]
+keywords = [
+  "agents",
+  "stigmergy",
+  "pheromone",
+  "web-automation",
+  "browser-use",
+  "playwright",
+  "llm",
+  "multi-agent",
+  "memory",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Topic :: Internet :: WWW/HTTP :: Browsers",
+]
+dependencies = []
+
+[project.scripts]
+scentline = "scentline.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/ar33s08/scentline"
+Issues = "https://github.com/ar33s08/scentline/issues"
+
+[tool.setuptools.packages.find]
+include = ["scentline*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
