@@ -1,5 +1,10 @@
 # Scentline
 
+![CI](https://github.com/ar33s08/scentline/actions/workflows/test.yml/badge.svg)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python 3.10–3.13](https://img.shields.io/badge/Python-3.10%20%E2%86%92%203.13-informational)](https://www.python.org/downloads/)
+**Zero dependencies** — stdlib only, tested to 24-process concurrency.
+
 **Stigmergic trail memory for web agents.** The live web becomes a shared
 pheromone substrate: agents lay evaporating, DOM-anchored trails over the
 routes they walk, and every later session — any framework, any process —
@@ -31,7 +36,16 @@ colony converges. Scentline applies that to browser agents:
   loosely.
 
 Everything is deterministic — no LLM inside the memory mechanics. The only
-stdlib dependency is Python itself. `pip install scentline` (zero deps).
+stdlib dependency is Python itself.
+
+## Install
+
+Not on PyPI yet — install from source:
+
+```bash
+git clone https://github.com/ar33s08/scentline && cd scentline
+pip install .          # or: pip install -e . ; then: pytest -q
+```
 
 ## Quickstart
 

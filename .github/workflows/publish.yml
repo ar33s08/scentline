@@ -1,0 +1,33 @@
+name: publish
+
+# Dormant by design: fires only when a GitHub Release is published.
+# Before first use, register a PyPI "GitHub Actions" trusted publisher for
+# this repo (see docs/RELEASE_CHECKLIST.md). Without it the publish step
+# fails safely — nothing is exposed until you choose to flip this on.
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  pypi:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install -e . pytest build
+      - name: Release gate (tests + zero-dep)
+        run: |
+          pytest -q
+          python scripts/check_zero_deps.py
+      - name: Build wheel + sdist
+        run: python -m build
+      - name: Publish to PyPI (trusted publishing)
+        uses: pypa/gh-action-pypi-publish@release/v1
